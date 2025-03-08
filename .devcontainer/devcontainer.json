@@ -1,0 +1,22 @@
+// devcontainer.json
+{
+    "name": "Ubuntu",
+    "image": "mcr.microsoft.com/devcontainers/base:jammy",
+    "features": {
+        "ghcr.io/devcontainers/features/go:1": {}
+    },
+
+    // Mount Docker socket from the host to container
+    "mounts": [
+        "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+    ],
+
+    // Allow container to share network with host (optional but useful for testing)
+    "runArgs": ["--network", "host"],
+
+    // Run container as root (fix permission issues)
+    "remoteUser": "root",
+
+    // Fix apt permissions and install Docker CLI after container is created
+    "postCreateCommand": "mkdir -p /var/lib/apt/lists/partial && chmod 755 -R /var/lib/apt/lists/ && sudo apt-get update && sudo apt-get install -y docker.io"
+}
