@@ -4,13 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 )
 
@@ -46,39 +43,12 @@ func CreatePod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := context.Background()
-
-	// Pull the container image if not available locally
-	log.Printf("Pulling image: %s", newPod.Image)
-	out, err := dockerClient.ImagePull(ctx, newPod.Image, image.PullOptions{})
+	// Schedule the pod using the scheduler
+	err = SchedulePod(&newPod)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to pull image '%s': %s", newPod.Image, err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to schedule pod: %s", err), http.StatusInternalServerError)
 		return
 	}
-	defer out.Close()
-	io.Copy(os.Stdout, out)
-
-	// Create the container
-	resp, err := dockerClient.ContainerCreate(ctx, &container.Config{
-		Image: newPod.Image,
-	}, nil, nil, nil, "")
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create container using image '%s': %s", newPod.Image, err), http.StatusInternalServerError)
-		return
-	}
-
-	// Start the container (SDK requires an empty struct)
-	if err := dockerClient.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to start container with ID '%s': %s", resp.ID, err), http.StatusInternalServerError)
-		return
-	}
-
-	// Store in pod registry
-	newPod.ID = resp.ID
-	podRegistry[newPod.ID] = newPod
-
-	// Log success
-	log.Printf("Pod created: ID=%s, Image=%s", newPod.ID, newPod.Image)
 
 	// Respond to client
 	w.WriteHeader(http.StatusCreated)
