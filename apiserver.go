@@ -1,10 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/client"
 )
 
 // Pod represents a simple containerized application
@@ -17,22 +24,57 @@ type Pod struct {
 // Store running pods in memory (for simplicity)
 var podRegistry = make(map[string]Pod)
 
-// CreatePod handles pod creation requests
 func CreatePod(w http.ResponseWriter, r *http.Request) {
+
+	// Read request response
 	var newPod Pod
-	err := json.NewDecoder(r.Body).Decode(&newPod) // Read JSON body
+	err := json.NewDecoder(r.Body).Decode(&newPod)
 	if err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	// Assign a unique ID (for now, using the pod name as ID)
-	newPod.ID = newPod.Name
+	// Initialize Docker client
+	ctx := context.Background()
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		panic(err)
+	}
+	defer cli.Close()
+
+	// Container Image Pull
+	imageName := newPod.Image //imageName := "bfirsh/reticulate-splines"
+
+	out, err := cli.ImagePull(ctx, imageName, image.PullOptions{})
+	if err != nil {
+		panic(err)
+	}
+	defer out.Close()
+	io.Copy(os.Stdout, out)
+
+	// Create Container
+	resp, err := cli.ContainerCreate(ctx, &container.Config{
+		Image: imageName,
+	}, nil, nil, nil, "")
+	if err != nil {
+		panic(err)
+	}
+
+	// Start Container
+	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		panic(err)
+	}
+
+	fmt.Println(resp.ID)
+
+	// Store in pod registry
+	newPod.ID = resp.ID
 	podRegistry[newPod.ID] = newPod
 
 	// Respond to client
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(newPod)
+
 }
 
 // ListPods returns all running pods
@@ -42,40 +84,18 @@ func ListPods(w http.ResponseWriter, r *http.Request) {
 		pods = append(pods, pod)
 	}
 
-	// Respond with JSON
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(pods)
-}
-
-// DeletePod handles pod deletion
-func DeletePod(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id") // Read pod ID from query param
-	if id == "" {
-		http.Error(w, "Missing pod ID", http.StatusBadRequest)
-		return
-	}
-
-	_, exists := podRegistry[id]
-	if !exists {
-		http.Error(w, "Pod not found", http.StatusNotFound)
-		return
-	}
-
-	delete(podRegistry, id) // Remove from registry
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "Pod %s deleted", id)
 }
 
 // SetupRoutes initializes API routes
 func SetupRoutes() {
 	http.HandleFunc("/createPod", CreatePod)
 	http.HandleFunc("/listPods", ListPods)
-	http.HandleFunc("/deletePod", DeletePod)
 }
 
-// Main function to start API server
 func main() {
 	fmt.Println("Starting API Server on port 8080...")
 	SetupRoutes()
-	log.Fatal(http.ListenAndServe(":8080", nil)) // Start HTTP server
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
