@@ -24,57 +24,65 @@ type Pod struct {
 // Store running pods in memory (for simplicity)
 var podRegistry = make(map[string]Pod)
 
-func CreatePod(w http.ResponseWriter, r *http.Request) {
+var dockerClient *client.Client // Global Docker client
 
-	// Read request response
+// Initialize Docker client
+func init() {
+	var err error
+	dockerClient, err = client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		log.Fatalf("Failed to initialize Docker client: %s", err)
+	}
+}
+
+// CreatePod starts a new container using Docker
+func CreatePod(w http.ResponseWriter, r *http.Request) {
 	var newPod Pod
+
+	// Read request body
 	err := json.NewDecoder(r.Body).Decode(&newPod)
 	if err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	// Initialize Docker client
 	ctx := context.Background()
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		panic(err)
-	}
-	defer cli.Close()
 
-	// Container Image Pull
-	imageName := newPod.Image //imageName := "bfirsh/reticulate-splines"
-
-	out, err := cli.ImagePull(ctx, imageName, image.PullOptions{})
+	// Pull the container image if not available locally
+	log.Printf("Pulling image: %s", newPod.Image)
+	out, err := dockerClient.ImagePull(ctx, newPod.Image, image.PullOptions{})
 	if err != nil {
-		panic(err)
+		http.Error(w, fmt.Sprintf("Failed to pull image '%s': %s", newPod.Image, err), http.StatusInternalServerError)
+		return
 	}
 	defer out.Close()
 	io.Copy(os.Stdout, out)
 
-	// Create Container
-	resp, err := cli.ContainerCreate(ctx, &container.Config{
-		Image: imageName,
+	// Create the container
+	resp, err := dockerClient.ContainerCreate(ctx, &container.Config{
+		Image: newPod.Image,
 	}, nil, nil, nil, "")
 	if err != nil {
-		panic(err)
+		http.Error(w, fmt.Sprintf("Failed to create container using image '%s': %s", newPod.Image, err), http.StatusInternalServerError)
+		return
 	}
 
-	// Start Container
-	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		panic(err)
+	// Start the container (SDK requires an empty struct)
+	if err := dockerClient.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to start container with ID '%s': %s", resp.ID, err), http.StatusInternalServerError)
+		return
 	}
-
-	fmt.Println(resp.ID)
 
 	// Store in pod registry
 	newPod.ID = resp.ID
 	podRegistry[newPod.ID] = newPod
 
+	// Log success
+	log.Printf("Pod created: ID=%s, Image=%s", newPod.ID, newPod.Image)
+
 	// Respond to client
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(newPod)
-
 }
 
 // ListPods returns all running pods
@@ -84,14 +92,47 @@ func ListPods(w http.ResponseWriter, r *http.Request) {
 		pods = append(pods, pod)
 	}
 
+	// Respond with pod list
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(pods)
+}
+
+// DeletePod stops and removes a container
+func DeletePod(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "Missing pod ID", http.StatusBadRequest)
+		return
+	}
+
+	// Stop the container
+	if err := dockerClient.ContainerStop(context.Background(), id, container.StopOptions{}); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to stop container '%s': %s", id, err), http.StatusInternalServerError)
+		return
+	}
+
+	// Remove the container (SDK requires an empty struct)
+	if err := dockerClient.ContainerRemove(context.Background(), id, container.RemoveOptions{}); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to remove container '%s': %s", id, err), http.StatusInternalServerError)
+		return
+	}
+
+	// Remove from registry
+	delete(podRegistry, id)
+
+	// Log success
+	log.Printf("Pod deleted: ID=%s", id)
+
+	// Respond to client
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Pod %s deleted", id)
 }
 
 // SetupRoutes initializes API routes
 func SetupRoutes() {
 	http.HandleFunc("/createPod", CreatePod)
 	http.HandleFunc("/listPods", ListPods)
+	http.HandleFunc("/deletePod", DeletePod)
 }
 
 func main() {
