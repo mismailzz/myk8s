@@ -57,9 +57,15 @@ func CreatePod(w http.ResponseWriter, r *http.Request) {
 
 // ListPods returns all running pods
 func ListPods(w http.ResponseWriter, r *http.Request) {
-	pods := make([]Pod, 0, len(podRegistry))
+	// track pods to node mapping
+	pods := make([]map[string]string, 0, len(podRegistry))
 	for _, pod := range podRegistry {
-		pods = append(pods, pod)
+		pods = append(pods, map[string]string{
+			"ID":    pod.ID,
+			"Name":  pod.Name,
+			"Image": pod.Image,
+			"Node":  podToNodeMapping[pod.ID],
+		})
 	}
 
 	// Respond with pod list
@@ -69,33 +75,46 @@ func ListPods(w http.ResponseWriter, r *http.Request) {
 
 // DeletePod stops and removes a container
 func DeletePod(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id")
-	if id == "" {
+	// Get pod ID from query string
+	podID := r.URL.Query().Get("id")
+	if podID == "" {
 		http.Error(w, "Missing pod ID", http.StatusBadRequest)
 		return
 	}
 
 	// Stop the container
-	if err := dockerClient.ContainerStop(context.Background(), id, container.StopOptions{}); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to stop container '%s': %s", id, err), http.StatusInternalServerError)
+	if err := dockerClient.ContainerStop(context.Background(), podID, container.StopOptions{}); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to stop container '%s': %s", podID, err), http.StatusInternalServerError)
 		return
 	}
 
 	// Remove the container (SDK requires an empty struct)
-	if err := dockerClient.ContainerRemove(context.Background(), id, container.RemoveOptions{}); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to remove container '%s': %s", id, err), http.StatusInternalServerError)
+	if err := dockerClient.ContainerRemove(context.Background(), podID, container.RemoveOptions{}); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to remove container '%s': %s", podID, err), http.StatusInternalServerError)
 		return
 	}
 
+	// Update node usage
+	// Free up capacity from the node
+	if nodeName, exists := podToNodeMapping[podID]; exists {
+		for i := range nodes {
+			if nodes[i].Name == nodeName {
+				nodes[i].Used--
+				break
+			}
+		}
+		delete(podToNodeMapping, podID)
+	}
+
 	// Remove from registry
-	delete(podRegistry, id)
+	delete(podRegistry, podID)
 
 	// Log success
-	log.Printf("Pod deleted: ID=%s", id)
+	log.Printf("Pod deleted: ID=%s", podID)
 
 	// Respond to client
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "Pod %s deleted", id)
+	fmt.Fprintf(w, "Pod %s deleted", podID)
 }
 
 // SetupRoutes initializes API routes
